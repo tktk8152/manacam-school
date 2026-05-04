@@ -236,6 +236,36 @@ ANSWER_STYLE_INSTRUCTIONS = {
     "with_explanation": "答え＋途中式（steps）＋解き方の解説（explanation）。解説はその学年の生徒にわかる言葉で書く。",
 }
 
+DIAGRAM_INSTRUCTIONS = """# 図形・測定問題の図
+図形、面積、体積、円、角度、平行・垂直など、図がある方が自然な問題では、各 question に任意で "diagram" を追加してください。
+計算だけの問題、文章だけで十分な問題には diagram を付けないでください。
+
+diagram で使える type:
+- "rectangle": 長方形・正方形
+- "triangle": 三角形
+- "circle": 円
+- "angle": 角
+- "parallelogram": 平行四辺形
+- "trapezoid": 台形
+- "cuboid": 直方体・立方体
+- "cylinder": 円柱
+- "sphere": 球
+- "regular_polygon": 正多角形
+- "line": 線分
+
+diagram の例:
+- {"type":"rectangle","width_label":"6cm","height_label":"4cm"}
+- {"type":"triangle","base_label":"8cm","height_label":"5cm"}
+- {"type":"circle","radius_label":"3cm"}
+- {"type":"angle","angle_label":"60°"}
+- {"type":"cuboid","width_label":"6cm","height_label":"4cm","depth_label":"3cm"}
+
+ルール:
+- diagram はJSONオブジェクトだけ。SVG、Markdown、説明文は入れない
+- 問題文の数字と diagram のラベルは必ず一致させる
+- ラベルは "6cm"、"4cm²"、"60°" のように短く書く
+"""
+
 
 PROMPT_FROM_UNIT = """あなたはココリュウスクール（兵庫県伊丹市・小学生向け算数教室）のベテラン問題作成アシスタントです。
 塾の先生が指定した単元・難易度・問題タイプ・解答形式に従って、学習指導要領に沿ったオリジナルの演習問題を作成します。
@@ -275,6 +305,8 @@ PROMPT_FROM_UNIT = """あなたはココリュウスクール（兵庫県伊丹�
   ]
 }}
 
+{diagram_instructions}
+
 # 普遍ルール（必ず守る）
 1. questions の数: ちょうど {num_questions} 問
 2. 文章は小学{grade_num}年生が読める言葉で。難しい漢字は使わない
@@ -307,6 +339,8 @@ PROMPT_TEMPLATE = """あなたはココリュウスクール（兵庫県伊丹�
   ]
 }}
 
+{diagram_instructions}
+
 # ルール
 - questions: ちょうど {num_questions} 問
 - 問題は元の教材と同じ単元・同じ形式の類題にする（数字や設定だけ変える）
@@ -336,6 +370,7 @@ def generate_problems(text: str, grade: str = "小5", num_questions: int = 8, di
             num_questions=num_questions,
             difficulty=difficulty,
             difficulty_instruction=difficulty_instruction,
+            diagram_instructions=DIAGRAM_INSTRUCTIONS,
         ),
         temperature=0.4,
         max_output_tokens=4000,
@@ -436,6 +471,8 @@ def _generate_from_multi(units: list, grade: str, num_questions: int,
 7. hint は1行のみ
 8. estimated_minutes: 全問解くのに要する目安時間（整数）。基礎=1問1〜2分、標準=1問2〜3分、応用=1問3〜5分、ハイレベル=1問5〜8分
 9. JSON以外の文字は一切出力しない
+
+{DIAGRAM_INSTRUCTIONS}
 """
 
     response = _generate_content_with_fallback(
@@ -485,6 +522,7 @@ def generate_from_unit(unit: dict, grade: str = "小5", num_questions: int = 8, 
             answer_style_fields=answer_style_fields,
             answer_style_instruction=answer_style_instruction,
             problem_type_block=problem_type_block,
+            diagram_instructions=DIAGRAM_INSTRUCTIONS,
         ),
         temperature=0.3,
         max_output_tokens=4000,

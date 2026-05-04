@@ -8,6 +8,7 @@ ManaCam for KOKORYUSCHOOL - PDF出力モジュール
 from pathlib import Path
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import math
 import re
 
 from reportlab.lib.pagesizes import A4
@@ -269,6 +270,296 @@ def _draw_text_or_inline_math(c: canvas.Canvas, text: str, x: float, y: float,
         c.drawString(x, y, line)
         y -= line_h
     return y
+
+
+def _diagram_type(diagram: dict | None) -> str:
+    if not isinstance(diagram, dict):
+        return ""
+    raw = str(diagram.get("type", "")).strip().lower().replace("-", "_")
+    aliases = {
+        "rect": "rectangle",
+        "right_triangle": "triangle",
+        "regular_polygon": "regular_polygon",
+        "polygon": "regular_polygon",
+        "正多角形": "regular_polygon",
+        "四角形": "rectangle",
+        "長方形": "rectangle",
+        "正方形": "square",
+        "三角形": "triangle",
+        "円": "circle",
+        "角": "angle",
+        "直方体": "cuboid",
+        "立方体": "cube",
+        "円柱": "cylinder",
+        "球": "sphere",
+        "線分": "line",
+    }
+    return aliases.get(raw, raw)
+
+
+def _diagram_label(diagram: dict, *keys: str) -> str:
+    labels = diagram.get("labels", {})
+    for key in keys:
+        for source in (diagram, labels if isinstance(labels, dict) else {}):
+            value = source.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return ""
+
+
+def _draw_label(c: canvas.Canvas, text: str, x: float, y: float,
+                size: float = 8, align: str = "center"):
+    if not text:
+        return
+    c.setFont(JP_FONT, size)
+    if align == "right":
+        c.drawRightString(x, y, text)
+    elif align == "left":
+        c.drawString(x, y, text)
+    else:
+        c.drawCentredString(x, y, text)
+
+
+def _diagram_height(diagram: dict | None) -> float:
+    dtype = _diagram_type(diagram)
+    if not dtype:
+        return 0
+    if dtype in ("cuboid", "cube", "cylinder", "sphere", "regular_polygon"):
+        return 38 * mm
+    if dtype in ("angle", "line"):
+        return 30 * mm
+    return 34 * mm
+
+
+def _draw_right_angle_marker(c: canvas.Canvas, x: float, y: float, size: float):
+    c.line(x, y, x + size, y)
+    c.line(x + size, y, x + size, y + size)
+    c.line(x + size, y + size, x, y + size)
+
+
+def _draw_geometry_diagram(c: canvas.Canvas, diagram: dict | None, x: float,
+                           y: float, max_width: float, font_size: float) -> float:
+    dtype = _diagram_type(diagram)
+    if not dtype:
+        return y
+
+    h = _diagram_height(diagram)
+    top = y - 2 * mm
+    left = x + 10 * mm
+    diagram_w = min(max_width - 20 * mm, 70 * mm)
+    stroke = (0.10, 0.18, 0.20)
+    guide = (0.45, 0.68, 0.70)
+    label_size = max(7, min(9, font_size - 2))
+
+    c.saveState()
+    c.setStrokeColorRGB(*stroke)
+    c.setFillColorRGB(0, 0, 0)
+    c.setLineWidth(1.0)
+
+    if dtype in ("rectangle", "square"):
+        w = min(46 * mm, diagram_w)
+        rect_h = 25 * mm if dtype == "rectangle" else min(30 * mm, w)
+        y0 = top - rect_h
+        c.rect(left, y0, w, rect_h, stroke=1, fill=0)
+        _draw_label(c, _diagram_label(diagram, "width_label", "bottom_label", "base_label", "width"),
+                    left + w / 2, y0 - 5 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "height_label", "right_label", "height"),
+                    left + w + 5 * mm, y0 + rect_h / 2 - 2 * mm, label_size, align="left")
+        _draw_label(c, _diagram_label(diagram, "top_label"), left + w / 2,
+                    y0 + rect_h + 2 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "left_label"), left - 4 * mm,
+                    y0 + rect_h / 2 - 2 * mm, label_size, align="right")
+
+    elif dtype == "triangle":
+        w = min(52 * mm, diagram_w)
+        tri_h = 27 * mm
+        x1, y1 = left, top - tri_h
+        x2, y2 = left + w, y1
+        x3, y3 = left + w * 0.54, top
+        c.line(x1, y1, x2, y2)
+        c.line(x2, y2, x3, y3)
+        c.line(x3, y3, x1, y1)
+        foot_x = x3
+        c.setStrokeColorRGB(*guide)
+        c.setDash(2, 2)
+        c.line(foot_x, y3, foot_x, y1)
+        c.setDash()
+        c.setStrokeColorRGB(*stroke)
+        _draw_right_angle_marker(c, foot_x, y1, 3 * mm)
+        _draw_label(c, _diagram_label(diagram, "base_label", "bottom_label", "base"),
+                    left + w / 2, y1 - 5 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "height_label", "height"),
+                    foot_x + 4 * mm, y1 + tri_h / 2 - 2 * mm, label_size, align="left")
+        _draw_label(c, _diagram_label(diagram, "left_label", "side_label"),
+                    (x1 + x3) / 2 - 2 * mm, (y1 + y3) / 2, label_size, align="right")
+        _draw_label(c, _diagram_label(diagram, "right_label"),
+                    (x2 + x3) / 2 + 2 * mm, (y2 + y3) / 2, label_size, align="left")
+
+    elif dtype == "circle":
+        r = 14 * mm
+        cx = left + 22 * mm
+        cy = top - 16 * mm
+        c.circle(cx, cy, r, stroke=1, fill=0)
+        radius_label = _diagram_label(diagram, "radius_label", "radius")
+        diameter_label = _diagram_label(diagram, "diameter_label", "diameter")
+        if diameter_label:
+            c.line(cx - r, cy, cx + r, cy)
+            _draw_label(c, diameter_label, cx, cy - 6 * mm, label_size)
+        else:
+            c.circle(cx, cy, 1.0, stroke=0, fill=1)
+            c.line(cx, cy, cx + r, cy)
+            _draw_label(c, radius_label, cx + r / 2, cy + 3 * mm, label_size)
+
+    elif dtype == "sphere":
+        r = 14 * mm
+        cx = left + 22 * mm
+        cy = top - 17 * mm
+        c.circle(cx, cy, r, stroke=1, fill=0)
+        c.setStrokeColorRGB(*guide)
+        c.setDash(2, 2)
+        c.ellipse(cx - r, cy - 5 * mm, cx + r, cy + 5 * mm, stroke=1, fill=0)
+        c.setDash()
+        c.setStrokeColorRGB(*stroke)
+        radius_label = _diagram_label(diagram, "radius_label", "radius")
+        diameter_label = _diagram_label(diagram, "diameter_label", "diameter")
+        if diameter_label:
+            c.line(cx - r, cy, cx + r, cy)
+            _draw_label(c, diameter_label, cx, cy - 7 * mm, label_size)
+        elif radius_label:
+            c.circle(cx, cy, 1.0, stroke=0, fill=1)
+            c.line(cx, cy, cx + r, cy)
+            _draw_label(c, radius_label, cx + r / 2, cy + 3 * mm, label_size)
+
+    elif dtype == "regular_polygon":
+        try:
+            sides = int(_diagram_label(diagram, "sides", "side_count", "n") or 6)
+        except ValueError:
+            sides = 6
+        sides = min(12, max(3, sides))
+        r = 15 * mm
+        cx = left + 25 * mm
+        cy = top - 18 * mm
+        start = -math.pi / 2
+        points = [
+            (
+                cx + math.cos(start + 2 * math.pi * i / sides) * r,
+                cy + math.sin(start + 2 * math.pi * i / sides) * r,
+            )
+            for i in range(sides)
+        ]
+        for p1, p2 in zip(points, points[1:] + points[:1]):
+            c.line(p1[0], p1[1], p2[0], p2[1])
+        c.setStrokeColorRGB(*guide)
+        c.setDash(2, 2)
+        c.circle(cx, cy, r, stroke=1, fill=0)
+        c.setDash()
+        c.setStrokeColorRGB(*stroke)
+        _draw_label(c, _diagram_label(diagram, "side_label", "length_label"),
+                    cx, cy - r - 5 * mm, label_size)
+
+    elif dtype == "angle":
+        vx = left + 5 * mm
+        vy = top - 24 * mm
+        ray = min(43 * mm, diagram_w - 5 * mm)
+        c.line(vx, vy, vx + ray, vy)
+        c.line(vx, vy, vx + ray * 0.78, vy + ray * 0.55)
+        c.arc(vx + 5 * mm, vy + 1 * mm, vx + 22 * mm, vy + 18 * mm, 0, 35)
+        _draw_label(c, _diagram_label(diagram, "angle_label", "angle"),
+                    vx + 24 * mm, vy + 10 * mm, label_size, align="left")
+
+    elif dtype == "parallelogram":
+        w = min(50 * mm, diagram_w)
+        ph = 23 * mm
+        skew = 13 * mm
+        y0 = top - ph
+        points = [(left + skew, top), (left + skew + w, top), (left + w, y0), (left, y0)]
+        c.line(points[0][0], points[0][1], points[1][0], points[1][1])
+        c.line(points[1][0], points[1][1], points[2][0], points[2][1])
+        c.line(points[2][0], points[2][1], points[3][0], points[3][1])
+        c.line(points[3][0], points[3][1], points[0][0], points[0][1])
+        c.setStrokeColorRGB(*guide)
+        c.setDash(2, 2)
+        c.line(left + skew, top, left + skew, y0)
+        c.setDash()
+        c.setStrokeColorRGB(*stroke)
+        _draw_label(c, _diagram_label(diagram, "base_label", "bottom_label", "base"),
+                    left + w / 2, y0 - 5 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "height_label", "height"),
+                    left + skew + 4 * mm, y0 + ph / 2 - 2 * mm, label_size, align="left")
+
+    elif dtype == "trapezoid":
+        bottom = min(54 * mm, diagram_w)
+        top_w = bottom * 0.58
+        th = 24 * mm
+        y0 = top - th
+        top_x = left + (bottom - top_w) / 2
+        points = [(top_x, top), (top_x + top_w, top), (left + bottom, y0), (left, y0)]
+        for p1, p2 in zip(points, points[1:] + points[:1]):
+            c.line(p1[0], p1[1], p2[0], p2[1])
+        c.setStrokeColorRGB(*guide)
+        c.setDash(2, 2)
+        c.line(top_x, top, top_x, y0)
+        c.setDash()
+        c.setStrokeColorRGB(*stroke)
+        _draw_label(c, _diagram_label(diagram, "top_label"),
+                    top_x + top_w / 2, top + 2 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "bottom_label", "base_label"),
+                    left + bottom / 2, y0 - 5 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "height_label", "height"),
+                    top_x + 4 * mm, y0 + th / 2 - 2 * mm, label_size, align="left")
+
+    elif dtype in ("cuboid", "cube"):
+        w = 34 * mm
+        box_h = 21 * mm
+        depth = 12 * mm
+        y0 = top - box_h - depth
+        c.rect(left, y0, w, box_h, stroke=1, fill=0)
+        c.line(left, y0 + box_h, left + depth, y0 + box_h + depth)
+        c.line(left + w, y0 + box_h, left + w + depth, y0 + box_h + depth)
+        c.line(left + w, y0, left + w + depth, y0 + depth)
+        c.line(left + depth, y0 + box_h + depth, left + w + depth, y0 + box_h + depth)
+        c.line(left + w + depth, y0 + depth, left + w + depth, y0 + box_h + depth)
+        c.line(left + w + depth, y0 + depth, left + w, y0)
+        _draw_label(c, _diagram_label(diagram, "width_label", "width"),
+                    left + w / 2, y0 - 5 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "height_label", "height"),
+                    left + w + depth + 5 * mm, y0 + box_h / 2 - 2 * mm, label_size, align="left")
+        _draw_label(c, _diagram_label(diagram, "depth_label", "depth"),
+                    left + w + depth / 2, y0 + box_h + depth / 2, label_size, align="left")
+
+    elif dtype == "cylinder":
+        cyl_w = 34 * mm
+        cyl_h = 26 * mm
+        y0 = top - cyl_h
+        c.ellipse(left, top - 6 * mm, left + cyl_w, top + 4 * mm, stroke=1, fill=0)
+        c.line(left, top - 1 * mm, left, y0)
+        c.line(left + cyl_w, top - 1 * mm, left + cyl_w, y0)
+        c.ellipse(left, y0 - 5 * mm, left + cyl_w, y0 + 5 * mm, stroke=1, fill=0)
+        c.line(left + cyl_w / 2, top - 1 * mm, left + cyl_w, top - 1 * mm)
+        _draw_label(c, _diagram_label(diagram, "radius_label", "radius"),
+                    left + cyl_w * 0.75, top + 1 * mm, label_size)
+        _draw_label(c, _diagram_label(diagram, "height_label", "height"),
+                    left + cyl_w + 5 * mm, y0 + cyl_h / 2 - 2 * mm, label_size, align="left")
+
+    elif dtype == "line":
+        w = min(55 * mm, diagram_w)
+        ly = top - 13 * mm
+        c.line(left, ly, left + w, ly)
+        c.circle(left, ly, 1.2, stroke=0, fill=1)
+        c.circle(left + w, ly, 1.2, stroke=0, fill=1)
+        _draw_label(c, _diagram_label(diagram, "length_label", "width_label", "length"),
+                    left + w / 2, ly - 6 * mm, label_size)
+
+    else:
+        c.restoreState()
+        return y
+
+    caption = _diagram_label(diagram, "caption")
+    if caption:
+        _draw_label(c, caption, left, top - h + 5 * mm, label_size, align="left")
+
+    c.restoreState()
+    return y - h
 
 
 def _draw_work_grid(c: canvas.Canvas, x: float, y: float, width: float,
@@ -635,13 +926,15 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
         expr = _parse_vertical_arithmetic(question_text) if not with_answers else None
         plain_expr = bool(expr and _is_plain_vertical_arithmetic(question_text))
         use_vertical_grid = bool(include_work_grid and expr and plain_expr)
+        diagram = qa.get("diagram") if not use_vertical_grid else None
+        diagram_h = _diagram_height(diagram)
         if with_answers:
-            required_space = line_h * 5
+            required_space = line_h * 5 + diagram_h
         elif use_vertical_grid:
             inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
             required_space = _row_count_for_expr(expr) * inline_cell + line_h + 5 * mm
         else:
-            required_space = line_h * (2 + ans_space)
+            required_space = line_h * (2 + ans_space) + diagram_h
 
         if y - required_space < (margin + 8 * mm):
             c.showPage()
@@ -672,6 +965,17 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                 line_h,
                 body_size,
             )
+
+        if diagram:
+            y = _draw_geometry_diagram(
+                c,
+                diagram,
+                margin,
+                y,
+                width - margin * 2,
+                body_size,
+            )
+            y -= 2 * mm
 
         if with_answers:
             ans = f"    答え: {qa.get('a', '')}"
