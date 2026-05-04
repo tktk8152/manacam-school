@@ -157,73 +157,89 @@ _FORMULA_TRANSLATION = str.maketrans({
     "＝": "=", "　": " ",
 })
 
-_ARITHMETIC_RE = re.compile(
-    r"(?<![\d./])(\d{1,7})\s*([+\-*xX×÷])\s*(\d{1,7})\s*="
+_ARITHMETIC_EXPR_RE = re.compile(
+    r"(?<![\d./])(\d{1,7}(?:\s*[+\-*xX×÷]\s*\d{1,7})+)\s*="
 )
+_ARITHMETIC_EXPR_FULL_RE = re.compile(
+    r"\d{1,7}(?:\s*[+\-*xX×÷]\s*\d{1,7})+\s*=\s*"
+)
+_ARITHMETIC_TOKEN_RE = re.compile(r"\d{1,7}|[+\-*xX×÷]")
 
 
 def _parse_vertical_arithmetic(text: str) -> dict | None:
-    """整数どうしの四則演算を、筆算配置用に取り出す。"""
+    """整数どうしの式を、筆算配置用に取り出す。"""
     normalized = str(text or "").translate(_FORMULA_TRANSLATION)
-    match = _ARITHMETIC_RE.search(normalized)
+    match = _ARITHMETIC_EXPR_RE.search(normalized)
     if not match:
         return None
 
-    left, op, right = match.groups()
-    op = {
-        "+": "+",
-        "-": "-",
-        "*": "×",
-        "x": "×",
-        "X": "×",
-        "×": "×",
-        "÷": "÷",
-    }[op]
-    return {"left": left, "right": right, "op": op}
+    tokens = _ARITHMETIC_TOKEN_RE.findall(match.group(1))
+    if len(tokens) < 3 or len(tokens) % 2 == 0:
+        return None
+
+    terms = tokens[0::2]
+    ops = [
+        {
+            "+": "+",
+            "-": "-",
+            "*": "×",
+            "x": "×",
+            "X": "×",
+            "×": "×",
+            "÷": "÷",
+        }[op]
+        for op in tokens[1::2]
+    ]
+    if "÷" in ops and (len(ops) != 1 or ops[0] != "÷"):
+        return None
+    if "×" in ops and len(ops) != 1:
+        return None
+    return {"terms": terms, "ops": ops, "raw": match.group(0).strip()}
 
 
 def _is_plain_vertical_arithmetic(text: str) -> bool:
     """式だけの問題なら、通常の横書き問題文を省いて筆算レイアウトにする。"""
     normalized = str(text or "").translate(_FORMULA_TRANSLATION).strip()
-    return re.fullmatch(r"\d{1,7}\s*[+\-*xX×÷]\s*\d{1,7}\s*=\s*", normalized) is not None
+    return _ARITHMETIC_EXPR_FULL_RE.fullmatch(normalized) is not None
 
 
 def _result_digit_count(expr: dict) -> int:
     """答え欄に必要な最小桁数を見積もる。"""
-    left = int(expr["left"])
-    right = int(expr["right"])
-    op = expr["op"]
+    terms = [int(term) for term in expr["terms"]]
+    ops = expr["ops"]
 
-    if op == "+":
-        value = left + right
-    elif op == "-":
-        value = abs(left - right)
-    elif op == "×":
-        value = left * right
-    elif op == "÷" and right:
-        value = left // right
-    else:
-        value = max(left, right)
+    value = terms[0]
+    for op, term in zip(ops, terms[1:]):
+        if op == "+":
+            value += term
+        elif op == "-":
+            value -= term
+        elif op == "×":
+            value *= term
+        elif op == "÷" and term:
+            value //= term
     return len(str(value))
 
 
 def _cell_count_for_expr(expr: dict) -> int:
-    if expr["op"] == "÷":
-        return max(2, len(expr["left"]), _result_digit_count(expr))
+    terms = expr["terms"]
+    if expr["ops"] == ["÷"]:
+        return max(2, len(terms[0]), _result_digit_count(expr))
     return max(
         2,
-        len(expr["left"]),
-        len(expr["right"]),
+        *(len(term) for term in terms),
         _result_digit_count(expr),
     )
 
 
 def _row_count_for_expr(expr: dict) -> int:
-    if expr["op"] == "×":
-        return max(6, 4 + len(expr["right"]))
-    if expr["op"] == "÷":
+    terms = expr["terms"]
+    ops = expr["ops"]
+    if ops == ["×"]:
+        return max(6, len(terms) + 4)
+    if ops == ["÷"]:
         return 5
-    return 5
+    return len(terms) + 3
 
 
 def _place_value_labels(count: int) -> list[str]:
@@ -252,6 +268,8 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
                                  block_x: float, top_y: float, block_w: float,
                                  cell: float) -> float:
     """たし算・ひき算・かけ算の筆算マスを描画し、高さを返す。"""
+    terms = expr["terms"]
+    ops = expr["ops"]
     rows = _row_count_for_expr(expr)
     cols = _cell_count_for_expr(expr)
     grid_w = cols * cell
@@ -295,30 +313,32 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
         x = grid_x + col * cell
         c.line(x, top_y, x, top_y - grid_h)
     for row in range(1, rows):
-        if row == 3:
+        if row == len(terms) + 1:
             continue
         y = top_y - row * cell
         c.line(grid_x, y, grid_x + grid_w, y)
     c.setDash()
 
     # 答えを書く線
-    answer_line_y = top_y - 3 * cell
+    answer_line_y = top_y - (len(terms) + 1) * cell
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(1.0)
     c.line(grid_x - 9 * mm, answer_line_y, grid_x + grid_w, answer_line_y)
 
     # 数字と演算記号
     c.setFillColorRGB(0, 0, 0)
-    _draw_digit_row(c, expr["left"], 1, grid_x, top_y, cols, cell, digit_size)
-    _draw_digit_row(c, expr["right"], 2, grid_x, top_y, cols, cell, digit_size)
-    _draw_centered(
-        c,
-        expr["op"],
-        grid_x - 6 * mm,
-        top_y - 2.5 * cell,
-        JP_FONT,
-        min(18, cell * 0.9),
-    )
+    for term_index, term in enumerate(terms):
+        row = term_index + 1
+        _draw_digit_row(c, term, row, grid_x, top_y, cols, cell, digit_size)
+        if term_index > 0:
+            _draw_centered(
+                c,
+                ops[term_index - 1],
+                grid_x - 6 * mm,
+                top_y - (row + 0.5) * cell,
+                JP_FONT,
+                min(18, cell * 0.9),
+            )
     c.restoreState()
     return grid_h
 
@@ -327,6 +347,7 @@ def _draw_vertical_division_problem(c: canvas.Canvas, index: int | None, expr: d
                                     block_x: float, top_y: float, block_w: float,
                                     cell: float) -> float:
     """わり算の筆算マスを描画し、高さを返す。"""
+    dividend, divisor = expr["terms"]
     rows = _row_count_for_expr(expr)
     cols = _cell_count_for_expr(expr)
     grid_w = cols * cell
@@ -366,8 +387,8 @@ def _draw_vertical_division_problem(c: canvas.Canvas, index: int | None, expr: d
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica", digit_size)
     c.drawRightString(grid_x - 2 * mm, top_y - 1.5 * cell - digit_size * 0.35,
-                      expr["right"])
-    _draw_digit_row(c, expr["left"], 1, grid_x, top_y, cols, cell, digit_size)
+                      divisor)
+    _draw_digit_row(c, dividend, 1, grid_x, top_y, cols, cell, digit_size)
     c.restoreState()
     return grid_h
 
@@ -375,7 +396,7 @@ def _draw_vertical_division_problem(c: canvas.Canvas, index: int | None, expr: d
 def _draw_vertical_arithmetic_problem(c: canvas.Canvas, index: int | None,
                                       expr: dict, block_x: float, top_y: float,
                                       block_w: float, cell: float) -> float:
-    if expr["op"] == "÷":
+    if expr["ops"] == ["÷"]:
         return _draw_vertical_division_problem(c, index, expr, block_x, top_y,
                                                block_w, cell)
     return _draw_vertical_stack_problem(c, index, expr, block_x, top_y,
@@ -434,7 +455,7 @@ def _render_vertical_arithmetic_sheet(c: canvas.Canvas, questions: list,
 def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                       style: dict, start_y: float, include_work_grid: bool = False):
     """問題を描画。with_answers=True なら答えとヒントも出す。"""
-    if not with_answers and include_work_grid:
+    if not with_answers:
         if _render_vertical_arithmetic_sheet(c, questions, style, start_y):
             return
 
@@ -449,24 +470,47 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
     c.setFont(JP_FONT, body_size)
 
     for i, qa in enumerate(questions, 1):
+        question_text = qa.get("q", "")
+        expr = _parse_vertical_arithmetic(question_text) if not with_answers else None
+        plain_expr = bool(expr and _is_plain_vertical_arithmetic(question_text))
+        auto_vertical = bool(expr and plain_expr)
         grid_rows = 6
-        required_space = line_h * 2
         if with_answers:
-            required_space += line_h * 3
+            required_space = line_h * 5
+        elif auto_vertical:
+            inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
+            required_space = _row_count_for_expr(expr) * inline_cell + 5 * mm
         elif include_work_grid:
-            required_space += grid_rows * 5 * mm + 4 * mm
+            if expr:
+                inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
+                required_space = line_h * 2 + _row_count_for_expr(expr) * inline_cell + 5 * mm
+            else:
+                required_space = line_h * 2 + grid_rows * 5 * mm + 4 * mm
         else:
-            required_space += line_h * ans_space
+            required_space = line_h * (2 + ans_space)
 
         if y - required_space < (margin + 8 * mm):
             c.showPage()
             c.setFont(JP_FONT, body_size)
             y = height - margin - 5 * mm
 
-        head = f"({i}) {qa.get('q', '')}"
-        for line in _wrap(head, max_chars=max_chars):
-            c.drawString(margin, y, line)
-            y -= line_h
+        if auto_vertical:
+            inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
+            block_w = max(48 * mm, _cell_count_for_expr(expr) * inline_cell + 24 * mm)
+            y -= _draw_vertical_arithmetic_problem(
+                c,
+                i,
+                expr,
+                margin,
+                y,
+                block_w,
+                inline_cell,
+            )
+        else:
+            head = f"({i}) {question_text}"
+            for line in _wrap(head, max_chars=max_chars):
+                c.drawString(margin, y, line)
+                y -= line_h
 
         if with_answers:
             ans = f"    答え: {qa.get('a', '')}"
@@ -491,8 +535,9 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                     c.drawString(margin, y, line)
                     y -= line_h
         else:
-            if include_work_grid:
-                expr = _parse_vertical_arithmetic(qa.get("q", ""))
+            if auto_vertical:
+                pass
+            elif include_work_grid:
                 if expr:
                     inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
                     grid_h = _row_count_for_expr(expr) * inline_cell
@@ -542,7 +587,7 @@ def make_pdf(result: dict, out_path: Path, grade: str = "小5",
         print_style: "standard" / "spacious" / "compact"
         include_score: True なら点数欄を追加
         score_max: 満点（デフォ100点）
-        include_work_grid: True なら生徒用ページに筆算用マス目を追加
+        include_work_grid: True なら未対応の問題にも空の計算マスを追加
 
     Returns:
         書き出したファイルパス

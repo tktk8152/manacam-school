@@ -462,7 +462,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     <label class="checkbox-label">
       <input type="checkbox" id="include_work_grid">
-      筆算用のマス目を入れる
+      空の計算マスも入れる（整数の式は自動で筆算）
     </label>
 
     <button type="submit" id="submit-btn">プリントを作る</button>
