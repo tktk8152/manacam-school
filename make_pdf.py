@@ -274,23 +274,10 @@ def _row_count_for_expr(expr: dict) -> int:
     terms = expr["terms"]
     ops = expr["ops"]
     if ops == ["×"]:
-        return max(6, len(terms) + 4)
+        return max(5, len(terms) + 3)
     if ops == ["÷"]:
         return 5
-    return len(terms) + 3
-
-
-def _place_value_labels(count: int) -> list[str]:
-    labels = ["百万", "十万", "万", "千", "百", "十", "一"]
-    if count > len(labels):
-        return [""] * count
-    return labels[-count:]
-
-
-def _place_value_labels_for_layout(layout: dict) -> list[str]:
-    if not layout["include_decimal"]:
-        return _place_value_labels(layout["cols"])
-    return [""] * layout["int_width"] + ["."] + [""] * layout["frac_width"]
+    return len(terms) + 2
 
 
 def _draw_centered(c: canvas.Canvas, text: str, x: float, y: float,
@@ -327,30 +314,14 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
     if grid_x + grid_w > block_x + block_w - 2 * mm:
         grid_x = block_x + block_w - grid_w - 2 * mm
 
-    teal = (0.28, 0.60, 0.64)
     pale_teal = (0.48, 0.72, 0.74)
     digit_size = min(18, cell * 0.84)
-    header_size = min(8, cell * 0.42)
 
     c.saveState()
     if index is not None:
         c.setFillColorRGB(0, 0, 0)
         c.setFont(JP_FONT, 10)
-        c.drawString(block_x, top_y - 1.75 * cell, f"({index})")
-
-    # 位取りの見出し行
-    c.setFillColorRGB(*teal)
-    c.rect(grid_x, top_y - cell, grid_w, cell, stroke=0, fill=1)
-    c.setFillColorRGB(1, 1, 1)
-    for col, label in enumerate(_place_value_labels_for_layout(layout)):
-        _draw_centered(
-            c,
-            label,
-            grid_x + (col + 0.5) * cell,
-            top_y - 0.5 * cell,
-            JP_FONT,
-            header_size,
-        )
+        c.drawString(block_x, top_y - 0.75 * cell, f"({index})")
 
     # マス目
     c.setStrokeColorRGB(*pale_teal)
@@ -361,14 +332,14 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
         x = grid_x + col * cell
         c.line(x, top_y, x, top_y - grid_h)
     for row in range(1, rows):
-        if row == len(terms) + 1:
+        if row == len(terms):
             continue
         y = top_y - row * cell
         c.line(grid_x, y, grid_x + grid_w, y)
     c.setDash()
 
     # 答えを書く線
-    answer_line_y = top_y - (len(terms) + 1) * cell
+    answer_line_y = top_y - len(terms) * cell
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(1.0)
     c.line(grid_x - 9 * mm, answer_line_y, grid_x + grid_w, answer_line_y)
@@ -376,7 +347,7 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
     # 数字と演算記号
     c.setFillColorRGB(0, 0, 0)
     for term_index, term in enumerate(terms):
-        row = term_index + 1
+        row = term_index
         _draw_number_row(c, term, row, grid_x, top_y, layout, cell, digit_size)
         if term_index > 0:
             _draw_centered(
