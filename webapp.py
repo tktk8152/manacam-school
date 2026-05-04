@@ -460,6 +460,11 @@ INDEX_HTML = """<!DOCTYPE html>
       点数欄を入れる（__ / 100点）
     </label>
 
+    <label class="checkbox-label">
+      <input type="checkbox" id="include_work_grid">
+      筆算用のマス目を入れる
+    </label>
+
     <button type="submit" id="submit-btn">プリントを作る</button>
   </form>
 
@@ -576,7 +581,8 @@ function loadHistory() {
       formatHistoryTime(item.timestamp),
       item.grade,
       item.difficulty,
-      `${item.num_questions || '-'}問`
+      `${item.num_questions || '-'}問`,
+      item.include_work_grid ? 'マス目' : ''
     ].filter(Boolean).join(' / ');
     const link = item.pdf_url
       ? `<a class="history-link" href="${item.pdf_url}" download>PDF</a>`
@@ -677,7 +683,8 @@ async function applyEdits() {
         grade: currentParams.grade,
         difficulty: currentParams.difficulty,
         num_questions: (edited.questions || []).length,
-        pdf_url: data.pdf_url
+        pdf_url: data.pdf_url,
+        include_work_grid: currentParams.include_work_grid === 'true'
       });
       setTimeout(() => { if (btn) btn.textContent = '📝 編集を反映してPDF再作成'; }, 2500);
     }
@@ -692,6 +699,7 @@ async function generateProblems() {
   const form = document.getElementById('form');
   const formData = new FormData(form);
   formData.set('include_score', document.getElementById('include_score').checked ? 'true' : 'false');
+  formData.set('include_work_grid', document.getElementById('include_work_grid').checked ? 'true' : 'false');
   formData.set('print_style', 'standard');
   const unitId = unitPickerSelect.value;
   formData.set('unit_ids', unitId);
@@ -727,6 +735,7 @@ async function generateProblems() {
       answer_mode: formData.get('answer_mode'),
       print_style: 'standard',
       include_score: document.getElementById('include_score').checked ? 'true' : 'false',
+      include_work_grid: document.getElementById('include_work_grid').checked ? 'true' : 'false',
     };
     renderResult(data);
     saveLocalHistory({
@@ -735,7 +744,8 @@ async function generateProblems() {
       grade: formData.get('grade'),
       difficulty: formData.get('difficulty'),
       num_questions: (data.questions || []).length,
-      pdf_url: data.pdf_url
+      pdf_url: data.pdf_url,
+      include_work_grid: document.getElementById('include_work_grid').checked
     });
   } catch (err) {
     stopLoading();
@@ -799,6 +809,7 @@ async def generate(
     problem_type: str = Form("おまかせ"),
     print_style: str = Form("standard"),
     include_score: str = Form("false"),
+    include_work_grid: str = Form("false"),
 ):
     if grade not in ALLOWED_GRADES:
         return JSONResponse({"error": "学年を選び直してください"}, status_code=400)
@@ -847,12 +858,14 @@ async def generate(
 
     include_answers = answer_mode != "none"
     score_flag = (include_score or "false").lower() == "true"
+    grid_flag = (include_work_grid or "false").lower() == "true"
     style_key = print_style if print_style in ALLOWED_PRINT_STYLES else "standard"
     try:
         make_pdf(result, pdf_path, grade=grade, difficulty=difficulty,
                  with_answer_page=include_answers,
                  print_style=style_key,
-                 include_score=score_flag)
+                 include_score=score_flag,
+                 include_work_grid=grid_flag)
     except Exception as e:
         return JSONResponse({"error": f"PDF生成に失敗しました: {e}"}, status_code=500)
 
@@ -867,6 +880,7 @@ async def generate(
         "num_questions": num_questions,
         "print_style": style_key,
         "include_score": score_flag,
+        "include_work_grid": grid_flag,
         "pdf_filename": pdf_filename,
         "summary": result.get("summary"),
         "estimated_minutes": result.get("estimated_minutes"),
@@ -892,6 +906,7 @@ async def repdf(payload: dict = Body(...)):
     answer_mode = payload.get("answer_mode", "answer_only")
     print_style = payload.get("print_style", "standard")
     include_score = payload.get("include_score", "false")
+    include_work_grid = payload.get("include_work_grid", "false")
     if grade not in ALLOWED_GRADES:
         return JSONResponse({"error": "学年が不正です"}, status_code=400)
     if difficulty not in ALLOWED_DIFFICULTIES:
@@ -901,6 +916,7 @@ async def repdf(payload: dict = Body(...)):
 
     include_answers = answer_mode != "none"
     score_flag = (str(include_score) or "false").lower() == "true"
+    grid_flag = (str(include_work_grid) or "false").lower() == "true"
     style_key = print_style if print_style in ALLOWED_PRINT_STYLES else "standard"
 
     if "questions" not in result or not result["questions"]:
@@ -916,7 +932,9 @@ async def repdf(payload: dict = Body(...)):
     try:
         make_pdf(result, pdf_path, grade=grade, difficulty=difficulty,
                  with_answer_page=include_answers,
-                 print_style=style_key, include_score=score_flag)
+                 print_style=style_key,
+                 include_score=score_flag,
+                 include_work_grid=grid_flag)
     except Exception as e:
         return JSONResponse({"error": f"PDF再生成失敗: {e}"}, status_code=500)
 
@@ -930,6 +948,7 @@ async def repdf(payload: dict = Body(...)):
         "num_questions": len(result.get("questions", [])),
         "print_style": style_key,
         "include_score": score_flag,
+        "include_work_grid": grid_flag,
         "pdf_filename": pdf_filename,
         "summary": result.get("summary"),
         "estimated_minutes": result.get("estimated_minutes"),

@@ -128,8 +128,29 @@ def _wrap(text: str, max_chars: int) -> list[str]:
     return lines
 
 
+def _draw_work_grid(c: canvas.Canvas, x: float, y: float, width: float,
+                    rows: int = 6, cell_mm: int = 5) -> float:
+    """筆算・計算メモ用の方眼を描画し、描画後のy座標を返す。"""
+    cell = cell_mm * mm
+    height = rows * cell
+    cols = int(width // cell)
+    grid_w = cols * cell
+
+    c.setStrokeColorRGB(0.78, 0.78, 0.78)
+    c.setLineWidth(0.25)
+    for col in range(cols + 1):
+        px = x + col * cell
+        c.line(px, y, px, y - height)
+    for row in range(rows + 1):
+        py = y - row * cell
+        c.line(x, py, x + grid_w, py)
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(0.5)
+    return y - height
+
+
 def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
-                      style: dict, start_y: float):
+                      style: dict, start_y: float, include_work_grid: bool = False):
     """問題を描画。with_answers=True なら答えとヒントも出す。"""
     width, height = A4
     margin = style["margin"] * mm
@@ -142,7 +163,16 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
     c.setFont(JP_FONT, body_size)
 
     for i, qa in enumerate(questions, 1):
-        if y < (margin + 10 * mm):
+        grid_rows = 6
+        required_space = line_h * 2
+        if with_answers:
+            required_space += line_h * 3
+        elif include_work_grid:
+            required_space += grid_rows * 5 * mm + 4 * mm
+        else:
+            required_space += line_h * ans_space
+
+        if y - required_space < (margin + 8 * mm):
             c.showPage()
             c.setFont(JP_FONT, body_size)
             y = height - margin - 5 * mm
@@ -175,7 +205,22 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                     c.drawString(margin, y, line)
                     y -= line_h
         else:
-            y -= line_h * ans_space  # 解答スペース
+            if include_work_grid:
+                grid_h = grid_rows * 5 * mm
+                if y - grid_h < (margin + 8 * mm):
+                    c.showPage()
+                    c.setFont(JP_FONT, body_size)
+                    y = height - margin - 5 * mm
+                y = _draw_work_grid(
+                    c,
+                    margin,
+                    y - 1 * mm,
+                    width - margin * 2,
+                    rows=grid_rows,
+                    cell_mm=5,
+                )
+            else:
+                y -= line_h * ans_space  # 解答スペース
 
         y -= 2 * mm  # 設問間
 
@@ -183,7 +228,8 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
 def make_pdf(result: dict, out_path: Path, grade: str = "小5",
              difficulty: str = "", with_answer_page: bool = True,
              print_style: str = "standard",
-             include_score: bool = False, score_max: int = 100) -> Path:
+             include_score: bool = False, score_max: int = 100,
+             include_work_grid: bool = False) -> Path:
     """
     生成結果からプリントPDFを出力。
 
@@ -192,6 +238,7 @@ def make_pdf(result: dict, out_path: Path, grade: str = "小5",
         print_style: "standard" / "spacious" / "compact"
         include_score: True なら点数欄を追加
         score_max: 満点（デフォ100点）
+        include_work_grid: True なら生徒用ページに筆算用マス目を追加
 
     Returns:
         書き出したファイルパス
@@ -215,7 +262,14 @@ def make_pdf(result: dict, out_path: Path, grade: str = "小5",
                               difficulty, estimated_minutes,
                               style=style, include_score=include_score,
                               score_max=score_max)
-    _render_questions(c, questions, with_answers=False, style=style, start_y=divider_y)
+    _render_questions(
+        c,
+        questions,
+        with_answers=False,
+        style=style,
+        start_y=divider_y,
+        include_work_grid=include_work_grid,
+    )
     c.showPage()
 
     # 2ページ目: 先生用解答（オプション）
@@ -245,3 +299,6 @@ if __name__ == "__main__":
         out = make_pdf(sample, Path(f"output_sample_{style}.pdf"), grade="小5",
                        print_style=style, include_score=True)
         print(f"✅ {style}: {out.resolve()}")
+    grid_out = make_pdf(sample, Path("output_sample_work_grid.pdf"), grade="小5",
+                        include_work_grid=True)
+    print(f"✅ work_grid: {grid_out.resolve()}")
