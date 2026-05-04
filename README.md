@@ -33,6 +33,7 @@
 ```env
 GEMINI_API_KEY=AIza...
 GEMINI_MODEL=gemini-3.1-flash-lite-preview
+GEMINI_FALLBACK_MODELS=gemini-2.5-flash,gemini-2.0-flash
 ```
 
 依存関係を入れる。

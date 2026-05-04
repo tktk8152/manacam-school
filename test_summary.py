@@ -8,9 +8,10 @@ SDK: google-genai（新公式SDK）
 import os
 import sys
 import json
+import time
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 load_dotenv()
 
@@ -23,6 +24,104 @@ if not API_KEY or API_KEY == "ここに貼り付け":
 
 client = genai.Client(api_key=API_KEY)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+FALLBACK_MODELS = os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.0-flash")
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+MAX_RETRIES = max(0, _env_int("GEMINI_MAX_RETRIES", 1))
+RETRY_WAIT_SECONDS = max(0.0, _env_float("GEMINI_RETRY_WAIT_SECONDS", 2))
+
+
+def _model_candidates() -> list[str]:
+    """優先モデル + 混雑時の予備モデルを重複なしで返す。"""
+    models = [MODEL_NAME]
+    models.extend(m.strip() for m in FALLBACK_MODELS.split(",") if m.strip())
+    unique = []
+    for model in models:
+        if model and model not in unique:
+            unique.append(model)
+    return unique
+
+
+def _error_status_code(exc: Exception) -> int | None:
+    for attr in ("code", "status_code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    status_code = _error_status_code(exc)
+    if status_code in RETRYABLE_STATUS_CODES:
+        return True
+    message = str(exc).lower()
+    return any(keyword in message for keyword in (
+        "unavailable",
+        "high demand",
+        "resource exhausted",
+        "rate limit",
+        "temporarily",
+        "timeout",
+    ))
+
+
+def _friendly_generation_error(exc: Exception) -> str:
+    status_code = _error_status_code(exc)
+    if status_code in {429, 503} or "high demand" in str(exc).lower():
+        return "Geminiが混雑しています。少し時間をおいてもう一度お試しください。"
+    return f"Geminiで問題を生成できませんでした: {exc}"
+
+
+def _generate_content_with_fallback(*, contents: str, temperature: float,
+                                    max_output_tokens: int):
+    """Geminiの一時混雑時に短く再試行し、予備モデルへ切り替える。"""
+    last_error = None
+    for model in _model_candidates():
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                if model != MODEL_NAME or attempt > 0:
+                    print(f"Gemini retry: model={model}, attempt={attempt + 1}")
+                return client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        response_mime_type="application/json",
+                        max_output_tokens=max_output_tokens,
+                    ),
+                )
+            except errors.APIError as exc:
+                last_error = exc
+                if not _is_retryable_error(exc):
+                    raise RuntimeError(_friendly_generation_error(exc)) from exc
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_WAIT_SECONDS)
+            except Exception as exc:
+                last_error = exc
+                if not _is_retryable_error(exc):
+                    raise
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_WAIT_SECONDS)
+    raise RuntimeError(_friendly_generation_error(last_error)) from last_error
 
 
 DIFFICULTY_INSTRUCTIONS = {
@@ -229,8 +328,7 @@ def generate_problems(text: str, grade: str = "小5", num_questions: int = 8, di
     grade_num = m.group() if m else "5"
     difficulty_instruction = DIFFICULTY_INSTRUCTIONS.get(difficulty, DIFFICULTY_INSTRUCTIONS["標準"])
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
+    response = _generate_content_with_fallback(
         contents=PROMPT_TEMPLATE.format(
             text=text,
             grade=grade,
@@ -239,11 +337,8 @@ def generate_problems(text: str, grade: str = "小5", num_questions: int = 8, di
             difficulty=difficulty,
             difficulty_instruction=difficulty_instruction,
         ),
-        config=types.GenerateContentConfig(
-            temperature=0.4,
-            response_mime_type="application/json",
-            max_output_tokens=4000,
-        ),
+        temperature=0.4,
+        max_output_tokens=4000,
     )
 
     raw = (response.text or "").strip()
@@ -343,14 +438,10 @@ def _generate_from_multi(units: list, grade: str, num_questions: int,
 9. JSON以外の文字は一切出力しない
 """
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
+    response = _generate_content_with_fallback(
         contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.4,
-            response_mime_type="application/json",
-            max_output_tokens=4500,
-        ),
+        temperature=0.4,
+        max_output_tokens=4500,
     )
 
     raw = (response.text or "").strip()
@@ -381,8 +472,7 @@ def generate_from_unit(unit: dict, grade: str = "小5", num_questions: int = 8, 
     answer_style_instruction = ANSWER_STYLE_INSTRUCTIONS.get(answer_style, ANSWER_STYLE_INSTRUCTIONS["answer_only"])
     problem_type_block = PROBLEM_TYPE_BLOCKS.get(problem_type, PROBLEM_TYPE_BLOCKS["おまかせ"])
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
+    response = _generate_content_with_fallback(
         contents=PROMPT_FROM_UNIT.format(
             grade=grade,
             grade_num=grade_num,
@@ -396,11 +486,8 @@ def generate_from_unit(unit: dict, grade: str = "小5", num_questions: int = 8, 
             answer_style_instruction=answer_style_instruction,
             problem_type_block=problem_type_block,
         ),
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            response_mime_type="application/json",
-            max_output_tokens=4000,
-        ),
+        temperature=0.3,
+        max_output_tokens=4000,
     )
 
     raw = (response.text or "").strip()
