@@ -130,6 +130,147 @@ def _wrap(text: str, max_chars: int) -> list[str]:
     return lines
 
 
+_SUPERSCRIPT_TRANSLATION = str.maketrans({
+    "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4",
+    "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+})
+_INLINE_FRACTION_RE = re.compile(r"(?<![\d./])(\d+)\s*/\s*(\d+)(?![\d./])")
+_INLINE_SUPERSCRIPT_RE = re.compile(r"(\d+(?:\.\d+)?)(?:\^(\d+)|([⁰¹²³⁴⁵⁶⁷⁸⁹]+)|の?(\d+)乗)")
+
+
+def _normalize_inline_math_text(text: str) -> str:
+    return str(text or "").translate(_FORMULA_TRANSLATION).translate(str.maketrans({
+        "／": "/",
+        "＾": "^",
+    }))
+
+
+def _needs_inline_math(text: str) -> bool:
+    normalized = _normalize_inline_math_text(text)
+    return bool(_INLINE_FRACTION_RE.search(normalized) or
+                _INLINE_SUPERSCRIPT_RE.search(normalized))
+
+
+def _inline_math_tokens(text: str) -> list[dict]:
+    normalized = _normalize_inline_math_text(text)
+    tokens = []
+    pos = 0
+    while pos < len(normalized):
+        fraction_match = _INLINE_FRACTION_RE.search(normalized, pos)
+        sup_match = _INLINE_SUPERSCRIPT_RE.search(normalized, pos)
+        matches = [m for m in (fraction_match, sup_match) if m]
+        if not matches:
+            tokens.append({"type": "text", "text": normalized[pos:]})
+            break
+
+        match = min(matches, key=lambda m: m.start())
+        if match.start() > pos:
+            tokens.append({"type": "text", "text": normalized[pos:match.start()]})
+
+        if match.re is _INLINE_FRACTION_RE:
+            tokens.append({
+                "type": "fraction",
+                "num": match.group(1),
+                "den": match.group(2),
+            })
+        else:
+            exponent = (
+                match.group(2) or
+                (match.group(3) or "").translate(_SUPERSCRIPT_TRANSLATION) or
+                match.group(4)
+            )
+            tokens.append({
+                "type": "sup",
+                "base": match.group(1),
+                "exp": exponent,
+            })
+        pos = match.end()
+    return [token for token in tokens if token.get("text") or token.get("num") or token.get("base")]
+
+
+def _measure_inline_math(tokens: list[dict], font_size: float) -> float:
+    width = 0
+    for token in tokens:
+        if token["type"] == "text":
+            width += pdfmetrics.stringWidth(token["text"], JP_FONT, font_size)
+        elif token["type"] == "fraction":
+            frac_size = font_size * 0.68
+            num_w = pdfmetrics.stringWidth(token["num"], "Helvetica", frac_size)
+            den_w = pdfmetrics.stringWidth(token["den"], "Helvetica", frac_size)
+            width += max(num_w, den_w) + 2
+        elif token["type"] == "sup":
+            sup_size = font_size * 0.58
+            width += pdfmetrics.stringWidth(token["base"], "Helvetica", font_size)
+            width += pdfmetrics.stringWidth(token["exp"], "Helvetica", sup_size)
+    return width
+
+
+def _draw_inline_math_line(c: canvas.Canvas, text: str, x: float, y: float,
+                           max_width: float, font_size: float,
+                           stroke_color: tuple[float, float, float] = (0, 0, 0)):
+    """分数や指数を小さく組み、1行に収まるよう縮小して描画する。"""
+    tokens = _inline_math_tokens(text)
+    if not tokens:
+        return
+
+    measured = _measure_inline_math(tokens, font_size)
+    scale = 1.0
+    if measured > max_width and measured > 0:
+        scale = max(0.55, max_width / measured)
+    size = font_size * scale
+    cursor = x
+
+    c.saveState()
+    c.setStrokeColorRGB(*stroke_color)
+    for token in tokens:
+        if token["type"] == "text":
+            c.setFont(JP_FONT, size)
+            c.drawString(cursor, y, token["text"])
+            cursor += pdfmetrics.stringWidth(token["text"], JP_FONT, size)
+            continue
+
+        if token["type"] == "fraction":
+            frac_size = size * 0.68
+            num_w = pdfmetrics.stringWidth(token["num"], "Helvetica", frac_size)
+            den_w = pdfmetrics.stringWidth(token["den"], "Helvetica", frac_size)
+            frac_w = max(num_w, den_w) + 2 * scale
+            center_x = cursor + frac_w / 2
+            bar_y = y + size * 0.08
+
+            c.setFont("Helvetica", frac_size)
+            c.drawString(center_x - num_w / 2, bar_y + frac_size * 0.25, token["num"])
+            c.drawString(center_x - den_w / 2, bar_y - frac_size * 1.02, token["den"])
+            c.setLineWidth(max(0.45, 0.7 * scale))
+            c.line(cursor, bar_y, cursor + frac_w, bar_y)
+            cursor += frac_w + 1.5 * scale
+            continue
+
+        if token["type"] == "sup":
+            sup_size = size * 0.58
+            c.setFont("Helvetica", size)
+            c.drawString(cursor, y, token["base"])
+            cursor += pdfmetrics.stringWidth(token["base"], "Helvetica", size)
+            c.setFont("Helvetica", sup_size)
+            c.drawString(cursor, y + size * 0.45, token["exp"])
+            cursor += pdfmetrics.stringWidth(token["exp"], "Helvetica", sup_size)
+    c.restoreState()
+
+
+def _draw_text_or_inline_math(c: canvas.Canvas, text: str, x: float, y: float,
+                              max_width: float, max_chars: int, line_h: float,
+                              font_size: float,
+                              stroke_color: tuple[float, float, float] = (0, 0, 0)) -> float:
+    if _needs_inline_math(text):
+        _draw_inline_math_line(c, text, x, y, max_width, font_size, stroke_color)
+        return y - line_h
+
+    c.setFont(JP_FONT, font_size)
+    for line in _wrap(text, max_chars=max_chars):
+        c.drawString(x, y, line)
+        y -= line_h
+    return y
+
+
 def _draw_work_grid(c: canvas.Canvas, x: float, y: float, width: float,
                     rows: int = 6, cell_mm: int = 5) -> float:
     """筆算・計算メモ用の方眼を描画し、描画後のy座標を返す。"""
@@ -521,9 +662,16 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
             )
         else:
             head = f"({i}) {question_text}"
-            for line in _wrap(head, max_chars=max_chars):
-                c.drawString(margin, y, line)
-                y -= line_h
+            y = _draw_text_or_inline_math(
+                c,
+                head,
+                margin,
+                y,
+                width - margin * 2,
+                max_chars,
+                line_h,
+                body_size,
+            )
 
         if with_answers:
             ans = f"    答え: {qa.get('a', '')}"
@@ -531,22 +679,51 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
             steps = qa.get("steps", "")
             explanation = qa.get("explanation", "")
             c.setFillColorRGB(0.82, 0.10, 0.10)  # 赤
-            for line in _wrap(ans, max_chars=max_chars):
-                c.drawString(margin, y, line)
-                y -= line_h
+            y = _draw_text_or_inline_math(
+                c,
+                ans,
+                margin,
+                y,
+                width - margin * 2,
+                max_chars,
+                line_h,
+                body_size,
+                stroke_color=(0.82, 0.10, 0.10),
+            )
             c.setFillColorRGB(0, 0, 0)
             if steps:
-                for line in _wrap(f"    途中式: {steps}", max_chars=max_chars):
-                    c.drawString(margin, y, line)
-                    y -= line_h
+                y = _draw_text_or_inline_math(
+                    c,
+                    f"    途中式: {steps}",
+                    margin,
+                    y,
+                    width - margin * 2,
+                    max_chars,
+                    line_h,
+                    body_size,
+                )
             if explanation:
-                for line in _wrap(f"    解説: {explanation}", max_chars=max_chars):
-                    c.drawString(margin, y, line)
-                    y -= line_h
+                y = _draw_text_or_inline_math(
+                    c,
+                    f"    解説: {explanation}",
+                    margin,
+                    y,
+                    width - margin * 2,
+                    max_chars,
+                    line_h,
+                    body_size,
+                )
             if hint:
-                for line in _wrap(f"    ヒント: {hint}", max_chars=max_chars):
-                    c.drawString(margin, y, line)
-                    y -= line_h
+                y = _draw_text_or_inline_math(
+                    c,
+                    f"    ヒント: {hint}",
+                    margin,
+                    y,
+                    width - margin * 2,
+                    max_chars,
+                    line_h,
+                    body_size,
+                )
         else:
             if use_vertical_grid:
                 pass
