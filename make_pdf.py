@@ -7,6 +7,7 @@ ManaCam for KOKORYUSCHOOL - PDF出力モジュール
 """
 from pathlib import Path
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import re
 
 from reportlab.lib.pagesizes import A4
@@ -153,17 +154,18 @@ def _draw_work_grid(c: canvas.Canvas, x: float, y: float, width: float,
 _FORMULA_TRANSLATION = str.maketrans({
     "０": "0", "１": "1", "２": "2", "３": "3", "４": "4",
     "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
-    "＋": "+", "－": "-", "−": "-", "＊": "*",
+    "＋": "+", "－": "-", "−": "-", "＊": "*", "．": ".",
     "＝": "=", "　": " ",
 })
 
+_NUMBER_PATTERN = r"\d{1,7}(?:\.\d{1,7})?"
 _ARITHMETIC_EXPR_RE = re.compile(
-    r"(?<![\d./])(\d{1,7}(?:\s*[+\-*xX×÷]\s*\d{1,7})+)\s*="
+    rf"(?<![\d./])({_NUMBER_PATTERN}(?:\s*[+\-*xX×÷]\s*{_NUMBER_PATTERN})+)\s*="
 )
 _ARITHMETIC_EXPR_FULL_RE = re.compile(
-    r"\d{1,7}(?:\s*[+\-*xX×÷]\s*\d{1,7})+\s*=\s*"
+    rf"{_NUMBER_PATTERN}(?:\s*[+\-*xX×÷]\s*{_NUMBER_PATTERN})+\s*=\s*"
 )
-_ARITHMETIC_TOKEN_RE = re.compile(r"\d{1,7}|[+\-*xX×÷]")
+_ARITHMETIC_TOKEN_RE = re.compile(rf"{_NUMBER_PATTERN}|[+\-*xX×÷]")
 
 
 def _parse_vertical_arithmetic(text: str) -> dict | None:
@@ -203,9 +205,12 @@ def _is_plain_vertical_arithmetic(text: str) -> bool:
     return _ARITHMETIC_EXPR_FULL_RE.fullmatch(normalized) is not None
 
 
-def _result_digit_count(expr: dict) -> int:
-    """答え欄に必要な最小桁数を見積もる。"""
-    terms = [int(term) for term in expr["terms"]]
+def _calculate_result_text(expr: dict) -> str | None:
+    """幅の見積もり用に答えを計算する。PDFには答えを出さない。"""
+    try:
+        terms = [Decimal(term) for term in expr["terms"]]
+    except InvalidOperation:
+        return None
     ops = expr["ops"]
 
     value = terms[0]
@@ -218,18 +223,51 @@ def _result_digit_count(expr: dict) -> int:
             value *= term
         elif op == "÷" and term:
             value //= term
-    return len(str(value))
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _split_number_text(value: str) -> tuple[str, str, bool]:
+    value = str(value).strip().lstrip("-")
+    if "." in value:
+        left, right = value.split(".", 1)
+        return left or "0", right, True
+    return value, "", False
+
+
+def _number_layout_for_expr(expr: dict) -> dict:
+    values = list(expr["terms"])
+    result = _calculate_result_text(expr)
+    if result and expr["ops"] != ["÷"]:
+        values.append(result)
+
+    parts = [_split_number_text(value) for value in values]
+    int_width = max(len(left) for left, _, _ in parts)
+    frac_width = max(len(right) for _, right, _ in parts)
+    has_decimal = any(has_dot for _, _, has_dot in parts)
+    include_decimal = has_decimal or frac_width > 0
+    cols = int_width + frac_width + (1 if include_decimal else 0)
+    return {
+        "cols": max(2, cols),
+        "int_width": int_width,
+        "frac_width": frac_width,
+        "include_decimal": include_decimal,
+    }
+
+
+def _format_number_for_layout(value: str, layout: dict) -> str:
+    left, right, has_dot = _split_number_text(value)
+    int_text = left.rjust(layout["int_width"])
+    if not layout["include_decimal"]:
+        return int_text.rjust(layout["cols"])
+    dot = "." if has_dot else " "
+    return (int_text + dot + right.ljust(layout["frac_width"])).rjust(layout["cols"])
 
 
 def _cell_count_for_expr(expr: dict) -> int:
-    terms = expr["terms"]
-    if expr["ops"] == ["÷"]:
-        return max(2, len(terms[0]), _result_digit_count(expr))
-    return max(
-        2,
-        *(len(term) for term in terms),
-        _result_digit_count(expr),
-    )
+    return _number_layout_for_expr(expr)["cols"]
 
 
 def _row_count_for_expr(expr: dict) -> int:
@@ -249,19 +287,28 @@ def _place_value_labels(count: int) -> list[str]:
     return labels[-count:]
 
 
+def _place_value_labels_for_layout(layout: dict) -> list[str]:
+    if not layout["include_decimal"]:
+        return _place_value_labels(layout["cols"])
+    return [""] * layout["int_width"] + ["."] + [""] * layout["frac_width"]
+
+
 def _draw_centered(c: canvas.Canvas, text: str, x: float, y: float,
                    font: str, size: float):
     c.setFont(font, size)
     c.drawCentredString(x, y - size * 0.35, text)
 
 
-def _draw_digit_row(c: canvas.Canvas, value: str, row: int, grid_x: float,
-                    top_y: float, cols: int, cell: float, digit_size: float):
-    start_col = cols - len(value)
+def _draw_number_row(c: canvas.Canvas, value: str, row: int, grid_x: float,
+                     top_y: float, layout: dict, cell: float, digit_size: float):
+    text = _format_number_for_layout(value, layout)
     center_y = top_y - (row + 0.5) * cell
-    for offset, digit in enumerate(value):
-        center_x = grid_x + (start_col + offset + 0.5) * cell
-        _draw_centered(c, digit, center_x, center_y, "Helvetica", digit_size)
+    for col, char in enumerate(text):
+        if char == " ":
+            continue
+        center_x = grid_x + (col + 0.5) * cell
+        size = digit_size * 0.82 if char == "." else digit_size
+        _draw_centered(c, char, center_x, center_y, "Helvetica", size)
 
 
 def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict,
@@ -271,7 +318,8 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
     terms = expr["terms"]
     ops = expr["ops"]
     rows = _row_count_for_expr(expr)
-    cols = _cell_count_for_expr(expr)
+    layout = _number_layout_for_expr(expr)
+    cols = layout["cols"]
     grid_w = cols * cell
     grid_h = rows * cell
     left_pad = 17 * mm if index is not None else 9 * mm
@@ -294,7 +342,7 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
     c.setFillColorRGB(*teal)
     c.rect(grid_x, top_y - cell, grid_w, cell, stroke=0, fill=1)
     c.setFillColorRGB(1, 1, 1)
-    for col, label in enumerate(_place_value_labels(cols)):
+    for col, label in enumerate(_place_value_labels_for_layout(layout)):
         _draw_centered(
             c,
             label,
@@ -329,7 +377,7 @@ def _draw_vertical_stack_problem(c: canvas.Canvas, index: int | None, expr: dict
     c.setFillColorRGB(0, 0, 0)
     for term_index, term in enumerate(terms):
         row = term_index + 1
-        _draw_digit_row(c, term, row, grid_x, top_y, cols, cell, digit_size)
+        _draw_number_row(c, term, row, grid_x, top_y, layout, cell, digit_size)
         if term_index > 0:
             _draw_centered(
                 c,
@@ -349,7 +397,8 @@ def _draw_vertical_division_problem(c: canvas.Canvas, index: int | None, expr: d
     """わり算の筆算マスを描画し、高さを返す。"""
     dividend, divisor = expr["terms"]
     rows = _row_count_for_expr(expr)
-    cols = _cell_count_for_expr(expr)
+    layout = _number_layout_for_expr(expr)
+    cols = layout["cols"]
     grid_w = cols * cell
     grid_h = rows * cell
     left_pad = 20 * mm if index is not None else 13 * mm
@@ -388,7 +437,7 @@ def _draw_vertical_division_problem(c: canvas.Canvas, index: int | None, expr: d
     c.setFont("Helvetica", digit_size)
     c.drawRightString(grid_x - 2 * mm, top_y - 1.5 * cell - digit_size * 0.35,
                       divisor)
-    _draw_digit_row(c, dividend, 1, grid_x, top_y, cols, cell, digit_size)
+    _draw_number_row(c, dividend, 1, grid_x, top_y, layout, cell, digit_size)
     c.restoreState()
     return grid_h
 
@@ -405,7 +454,7 @@ def _draw_vertical_arithmetic_problem(c: canvas.Canvas, index: int | None,
 
 def _render_vertical_arithmetic_sheet(c: canvas.Canvas, questions: list,
                                       style: dict, start_y: float) -> bool:
-    """式だけの整数計算は、紙面を広く使う筆算レイアウトで描画する。"""
+    """式だけの計算は、紙面を広く使う筆算レイアウトで描画する。"""
     parsed = []
     for qa in questions:
         q = qa.get("q", "")
@@ -455,7 +504,7 @@ def _render_vertical_arithmetic_sheet(c: canvas.Canvas, questions: list,
 def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                       style: dict, start_y: float, include_work_grid: bool = False):
     """問題を描画。with_answers=True なら答えとヒントも出す。"""
-    if not with_answers:
+    if not with_answers and include_work_grid:
         if _render_vertical_arithmetic_sheet(c, questions, style, start_y):
             return
 
@@ -473,19 +522,12 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
         question_text = qa.get("q", "")
         expr = _parse_vertical_arithmetic(question_text) if not with_answers else None
         plain_expr = bool(expr and _is_plain_vertical_arithmetic(question_text))
-        auto_vertical = bool(expr and plain_expr)
-        grid_rows = 6
+        use_vertical_grid = bool(include_work_grid and expr and plain_expr)
         if with_answers:
             required_space = line_h * 5
-        elif auto_vertical:
+        elif use_vertical_grid:
             inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
-            required_space = _row_count_for_expr(expr) * inline_cell + 5 * mm
-        elif include_work_grid:
-            if expr:
-                inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
-                required_space = line_h * 2 + _row_count_for_expr(expr) * inline_cell + 5 * mm
-            else:
-                required_space = line_h * 2 + grid_rows * 5 * mm + 4 * mm
+            required_space = _row_count_for_expr(expr) * inline_cell + line_h + 5 * mm
         else:
             required_space = line_h * (2 + ans_space)
 
@@ -494,7 +536,7 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
             c.setFont(JP_FONT, body_size)
             y = height - margin - 5 * mm
 
-        if auto_vertical:
+        if use_vertical_grid:
             inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
             block_w = max(48 * mm, _cell_count_for_expr(expr) * inline_cell + 24 * mm)
             y -= _draw_vertical_arithmetic_problem(
@@ -535,43 +577,12 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                     c.drawString(margin, y, line)
                     y -= line_h
         else:
-            if auto_vertical:
+            if use_vertical_grid:
                 pass
-            elif include_work_grid:
-                if expr:
-                    inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
-                    grid_h = _row_count_for_expr(expr) * inline_cell
-                else:
-                    grid_h = grid_rows * 5 * mm
-                if y - grid_h < (margin + 8 * mm):
-                    c.showPage()
-                    c.setFont(JP_FONT, body_size)
-                    y = height - margin - 5 * mm
-                if expr:
-                    y -= 1 * mm
-                    block_w = max(48 * mm, _cell_count_for_expr(expr) * inline_cell + 24 * mm)
-                    y -= _draw_vertical_arithmetic_problem(
-                        c,
-                        None,
-                        expr,
-                        margin,
-                        y,
-                        block_w,
-                        inline_cell,
-                    )
-                else:
-                    y = _draw_work_grid(
-                        c,
-                        margin,
-                        y - 1 * mm,
-                        width - margin * 2,
-                        rows=grid_rows,
-                        cell_mm=5,
-                    )
             else:
                 y -= line_h * ans_space  # 解答スペース
 
-        y -= 2 * mm  # 設問間
+        y -= 7 * mm if use_vertical_grid else 2 * mm  # 設問間
 
 
 def make_pdf(result: dict, out_path: Path, grade: str = "小5",
@@ -587,7 +598,7 @@ def make_pdf(result: dict, out_path: Path, grade: str = "小5",
         print_style: "standard" / "spacious" / "compact"
         include_score: True なら点数欄を追加
         score_max: 満点（デフォ100点）
-        include_work_grid: True なら未対応の問題にも空の計算マスを追加
+        include_work_grid: True なら数字だけの式を筆算マスにする
 
     Returns:
         書き出したファイルパス
