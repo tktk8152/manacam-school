@@ -272,6 +272,167 @@ def _draw_text_or_inline_math(c: canvas.Canvas, text: str, x: float, y: float,
     return y
 
 
+_CHOICE_KANA_LABEL_RE = re.compile(r"(^|[、,\s])([あいうえおアイウエオA-Da-d])\s*[：:]")
+_CHOICE_CIRCLED_LABEL_RE = re.compile(r"(^|[、,\s])([①②③④⑤⑥⑦⑧])\s*")
+
+
+def _clean_choice_text(text: str) -> str:
+    return str(text or "").strip(" 　、,，;；")
+
+
+def _choices_from_field(raw_choices) -> list[dict]:
+    if not raw_choices:
+        return []
+    choices = []
+    if isinstance(raw_choices, dict):
+        raw_choices = [{"label": label, "text": text} for label, text in raw_choices.items()]
+    if not isinstance(raw_choices, list):
+        return []
+
+    for index, item in enumerate(raw_choices):
+        label = ""
+        text = ""
+        if isinstance(item, dict):
+            label = str(item.get("label") or item.get("key") or item.get("id") or "").strip()
+            text = str(item.get("text") or item.get("value") or item.get("choice") or "").strip()
+        else:
+            item_text = str(item).strip()
+            match = re.match(r"^([あいうえおアイウエオA-Da-d①②③④⑤⑥⑦⑧])\s*[：:.\s]\s*(.+)$", item_text)
+            if match:
+                label, text = match.group(1), match.group(2)
+            else:
+                text = item_text
+        if not label:
+            label = ["あ", "い", "う", "え", "お", "か", "き", "く"][index] if index < 8 else str(index + 1)
+        if text:
+            choices.append({"label": label, "text": text})
+    return choices
+
+
+def _choices_from_labeled_blob(blob: str) -> list[dict]:
+    blob = _normalize_inline_math_text(blob)
+    matches = list(_CHOICE_KANA_LABEL_RE.finditer(blob))
+    if not matches:
+        matches = list(_CHOICE_CIRCLED_LABEL_RE.finditer(blob))
+    if len(matches) < 2:
+        return []
+
+    choices = []
+    for idx, match in enumerate(matches):
+        label = match.group(2)
+        start = match.end()
+        end = matches[idx + 1].start(1) if idx + 1 < len(matches) else len(blob)
+        text = _clean_choice_text(blob[start:end])
+        if text:
+            choices.append({"label": label, "text": text})
+    return choices
+
+
+def _inline_choices_from_question(text: str) -> tuple[str, list[dict]]:
+    text = str(text or "").strip()
+    paren_matches = list(re.finditer(r"[（(]([^()（）]+)[）)]\s*$", text))
+    if paren_matches:
+        match = paren_matches[-1]
+        choices = _choices_from_labeled_blob(match.group(1))
+        if choices:
+            return text[:match.start()].rstrip(" 　。."), choices
+
+    marker_matches = list(_CHOICE_CIRCLED_LABEL_RE.finditer(_normalize_inline_math_text(text)))
+    if len(marker_matches) >= 2:
+        choices = _choices_from_labeled_blob(text[marker_matches[0].start(2):])
+        if choices:
+            return text[:marker_matches[0].start(2)].rstrip(" 　。."), choices
+
+    return text, []
+
+
+def _split_choice_question(question_text: str, qa: dict | None = None) -> tuple[str, list[dict]]:
+    text = str(question_text or "").strip()
+    inline_stem, inline_choices = _inline_choices_from_question(text)
+
+    if isinstance(qa, dict):
+        choices = _choices_from_field(qa.get("choices") or qa.get("choice_options"))
+        if choices:
+            stem = inline_stem if inline_choices else text
+            return stem, choices
+
+    if inline_choices:
+        return inline_stem, inline_choices
+
+    return text, []
+
+
+def _choice_box_columns(choices: list[dict], max_width: float, font_size: float) -> int:
+    if len(choices) <= 1:
+        return 1
+    if len(choices) <= 3:
+        col_w = (max_width - 8 * mm) / 3
+        longest = max(
+            pdfmetrics.stringWidth(f"{choice['label']} {choice['text']}", JP_FONT, font_size)
+            for choice in choices
+        )
+        if longest < col_w - 10 * mm:
+            return len(choices)
+    return 2
+
+
+def _choice_boxes_height(choices: list[dict], max_width: float, font_size: float) -> float:
+    if not choices:
+        return 0
+    columns = _choice_box_columns(choices, max_width, font_size)
+    rows = (len(choices) + columns - 1) // columns
+    return rows * 10 * mm + 7 * mm
+
+
+def _draw_choice_boxes(c: canvas.Canvas, choices: list[dict], x: float, y: float,
+                       max_width: float, font_size: float) -> float:
+    if not choices:
+        return y
+
+    columns = _choice_box_columns(choices, max_width, font_size)
+    gap = 4 * mm
+    box_h = 8 * mm
+    box_w = (max_width - gap * (columns - 1)) / columns
+    top = y - 1.5 * mm
+    label_r = 2.7 * mm
+
+    c.saveState()
+    for idx, choice in enumerate(choices):
+        row = idx // columns
+        col = idx % columns
+        bx = x + col * (box_w + gap)
+        by = top - (row + 1) * box_h - row * 2 * mm
+        cy = by + box_h / 2
+
+        c.setStrokeColorRGB(0.54, 0.62, 0.64)
+        c.setFillColorRGB(0.985, 0.99, 0.99)
+        c.roundRect(bx, by, box_w, box_h, 2 * mm, stroke=1, fill=1)
+
+        c.setFillColorRGB(1, 1, 1)
+        c.setStrokeColorRGB(0.15, 0.25, 0.28)
+        c.circle(bx + 5 * mm, cy, label_r, stroke=1, fill=1)
+        c.setFillColorRGB(0, 0, 0)
+        _draw_label(c, choice["label"], bx + 5 * mm, cy - 1.4 * mm, max(7, font_size - 3))
+
+        text_x = bx + 10 * mm
+        text_y = cy - font_size * 0.32
+        available = box_w - 12 * mm
+        text = str(choice["text"])
+        if _needs_inline_math(text):
+            _draw_inline_math_line(c, text, text_x, text_y, available, font_size - 1)
+        else:
+            text_size = font_size - 1
+            text_width = pdfmetrics.stringWidth(text, JP_FONT, text_size)
+            if text_width > available and text_width > 0:
+                text_size = max(7, text_size * available / text_width)
+            c.setFont(JP_FONT, text_size)
+            c.drawString(text_x, text_y, text)
+
+    c.restoreState()
+    rows = (len(choices) + columns - 1) // columns
+    return top - rows * box_h - max(0, rows - 1) * 2 * mm - 5 * mm
+
+
 def _diagram_type(diagram: dict | None) -> str:
     if not isinstance(diagram, dict):
         return ""
@@ -926,15 +1087,17 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
         expr = _parse_vertical_arithmetic(question_text) if not with_answers else None
         plain_expr = bool(expr and _is_plain_vertical_arithmetic(question_text))
         use_vertical_grid = bool(include_work_grid and expr and plain_expr)
+        choice_stem, choices = _split_choice_question(question_text, qa)
+        choice_h = 0 if use_vertical_grid else _choice_boxes_height(choices, width - margin * 2, body_size)
         diagram = qa.get("diagram") if not use_vertical_grid else None
         diagram_h = _diagram_height(diagram)
         if with_answers:
-            required_space = line_h * 5 + diagram_h
+            required_space = line_h * 5 + diagram_h + choice_h
         elif use_vertical_grid:
             inline_cell = 7 * mm if _cell_count_for_expr(expr) <= 4 else 6 * mm
             required_space = _row_count_for_expr(expr) * inline_cell + line_h + 5 * mm
         else:
-            required_space = line_h * (2 + ans_space) + diagram_h
+            required_space = line_h * (2 + (0 if choices else ans_space)) + diagram_h + choice_h
 
         if y - required_space < (margin + 8 * mm):
             c.showPage()
@@ -954,7 +1117,7 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                 inline_cell,
             )
         else:
-            head = f"({i}) {question_text}"
+            head = f"({i}) {choice_stem}"
             y = _draw_text_or_inline_math(
                 c,
                 head,
@@ -965,6 +1128,15 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                 line_h,
                 body_size,
             )
+            if choices:
+                y = _draw_choice_boxes(
+                    c,
+                    choices,
+                    margin,
+                    y,
+                    width - margin * 2,
+                    body_size,
+                )
 
         if diagram:
             y = _draw_geometry_diagram(
@@ -1030,6 +1202,8 @@ def _render_questions(c: canvas.Canvas, questions: list, with_answers: bool,
                 )
         else:
             if use_vertical_grid:
+                pass
+            elif choices:
                 pass
             else:
                 y -= line_h * ans_space  # 解答スペース

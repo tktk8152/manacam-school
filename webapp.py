@@ -291,26 +291,52 @@ INDEX_HTML = """<!DOCTYPE html>
     background: linear-gradient(90deg, transparent, #5a8044 50%, transparent);
     background-size: 200% 100%;
   }
-  .qitem .qtext-input, .qitem .qans-input {
+  .qitem .qtext-input, .qitem .qans-input, .qitem .choice-label-input, .qitem .choice-text-input {
     width: 100%; padding: 4px 6px; margin-top: 2px;
     border: 1px solid transparent; background: transparent;
     color: inherit; font-size: 14px; font-family: inherit;
     border-radius: 4px;
   }
-  .qitem .qtext-input:hover, .qitem .qans-input:hover {
+  .qitem .qtext-input:hover, .qitem .qans-input:hover,
+  .qitem .choice-label-input:hover, .qitem .choice-text-input:hover {
     border-color: #d8d0c0;
   }
-  .qitem .qtext-input:focus, .qitem .qans-input:focus {
+  .qitem .qtext-input:focus, .qitem .qans-input:focus,
+  .qitem .choice-label-input:focus, .qitem .choice-text-input:focus {
     border-color: #6b8e4e; outline: none; background: #f8faf3;
   }
   [data-theme="dark"] .qitem .qtext-input:hover,
-  [data-theme="dark"] .qitem .qans-input:hover { border-color: #444; }
+  [data-theme="dark"] .qitem .qans-input:hover,
+  [data-theme="dark"] .qitem .choice-label-input:hover,
+  [data-theme="dark"] .qitem .choice-text-input:hover { border-color: #444; }
   [data-theme="dark"] .qitem .qtext-input:focus,
-  [data-theme="dark"] .qitem .qans-input:focus {
+  [data-theme="dark"] .qitem .qans-input:focus,
+  [data-theme="dark"] .qitem .choice-label-input:focus,
+  [data-theme="dark"] .qitem .choice-text-input:focus {
     background: #1a1a1a; border-color: #5a8044;
   }
   .qitem .ans-row { display: flex; align-items: baseline; gap: 6px; color: #888; font-size: 13px; }
   .qitem .ans-row .label { white-space: nowrap; }
+  .qitem .choice-list {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 6px; margin: 8px 0 6px;
+  }
+  .qitem .choice-edit-row {
+    display: flex; align-items: center; gap: 4px;
+    border: 1px solid #d8d0c0; background: #fbfcf8;
+    border-radius: 6px; padding: 3px 5px;
+  }
+  .qitem .choice-label-input {
+    width: 34px; flex: 0 0 34px; text-align: center; font-weight: 600;
+    background: #fff; border-color: #d8d0c0;
+  }
+  .qitem .choice-text-input { flex: 1; min-width: 0; }
+  [data-theme="dark"] .qitem .choice-edit-row {
+    background: #242424; border-color: #444;
+  }
+  [data-theme="dark"] .qitem .choice-label-input {
+    background: #1a1a1a; border-color: #444;
+  }
   .apply-edit-btn {
     width: 100%; margin-top: 8px;
     background: #506b5a; color: #fff;
@@ -623,12 +649,29 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function renderChoiceInputs(choices) {
+  if (!Array.isArray(choices) || choices.length === 0) return '';
+  const rows = choices.map((choice, j) => {
+    const obj = choice && typeof choice === 'object' ? choice : {};
+    const label = obj.label || obj.key || obj.id || '';
+    const text = obj.text || obj.value || obj.choice || (typeof choice === 'string' ? choice : '');
+    return `
+      <div class="choice-edit-row" data-choice-index="${j}">
+        <input type="text" class="choice-label-input" value="${escapeHtml(label)}" aria-label="選択肢ラベル">
+        <input type="text" class="choice-text-input" value="${escapeHtml(text)}" aria-label="選択肢本文">
+      </div>
+    `;
+  }).join('');
+  return `<div class="choice-list">${rows}</div>`;
+}
+
 function renderResult(data) {
   const qList = (data.questions || []).map((qa, i) =>
     `<div class="qitem" data-index="${i}">
       <div><strong>Q${i+1}.</strong>
         <input type="text" class="qtext-input" value="${escapeHtml(qa.q)}">
       </div>
+      ${renderChoiceInputs(qa.choices)}
       <div class="ans-row">
         <span class="label">答え:</span>
         <input type="text" class="qans-input" value="${escapeHtml(qa.a)}">
@@ -658,6 +701,13 @@ async function applyEdits() {
     if (edited.questions[i]) {
       edited.questions[i].q = q;
       edited.questions[i].a = a;
+      const choiceRows = el.querySelectorAll('.choice-edit-row');
+      if (choiceRows.length) {
+        edited.questions[i].choices = Array.from(choiceRows).map(row => ({
+          label: row.querySelector('.choice-label-input').value,
+          text: row.querySelector('.choice-text-input').value
+        })).filter(choice => choice.text.trim());
+      }
     }
   });
   const btn = document.querySelector('.apply-edit-btn');
